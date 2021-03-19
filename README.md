@@ -22,7 +22,7 @@ ie `mount -o loop system.img mnt/system`.
 - verify - Check the checksum on system.img.  This file is usually in 3x 400M parts and needs to be `cat`ed together.
 - update - Updates the checksum on system.img.
 - decrypt - "Decrypts" the boot.img or vendor.img files.
-- encrypt - "Encrypts" the boot.img or vendor.img files. (work in progress)
+- encrypt - "Encrypts" the boot.img or vendor.img files.
 
 This tool, combined with `unpackbootimg` and `mkbootimg` (see android source code) should give a developer nearly
 full control over customizing firmware for their headunit.

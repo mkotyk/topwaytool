@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <ctype.h>
 #include <openssl/md5.h>
 
 typedef enum result { OK = 0, ERROR, MEM_ERROR, IO_ERROR } result_t;
@@ -25,6 +26,16 @@ const uint8_t key_b[] = {0x81, 0x6B, 0xAE, 0x89, 0x3F, 0x95, 0xE6, 0xDB, 0x96, 0
 }
 
 typedef result_t (*block_process_t)(uint8_t* data, size_t bytes_read, void* context);
+
+uint8_t hexdigit(char hex)
+{
+    return (hex <= '9')?hex-'0':toupper(hex)-'A' + 10;
+}
+
+uint8_t hexbyte(const char* hex)
+{
+    return (hexdigit(*hex) << 4) | hexdigit(*(hex+1)) ;
+}
 
 result_t block_processor(FILE* in, size_t block_size, size_t bytes_to_be_processed, block_process_t process, void* context) {
     size_t bytes_processed = 0;
@@ -168,7 +179,73 @@ result_t decrypt_image(FILE* in, FILE* out) {
     return block_processor(in, hash_size, content_size, &de_obfuscate_block_processor, &context);
 }
 
-result_t encrypt_image(FILE* in, FILE* out) {
+result_t obfuscate_block_processor(uint8_t* data, size_t bytes_read, void* context) {
+    de_obfuscate_context_t* ctx = (de_obfuscate_context_t*) context;
+    int index;
+
+    obfuscate_block(ctx->key_block, ctx->xor_block, ctx->xor_block);
+    for(index = 0; index < hash_size; index++) {
+        data[index] ^= ctx->xor_block[index];
+    }
+    if (fwrite(data, 1, bytes_read, ctx->out) != bytes_read) {
+        fprintf(stderr, "Unable to write output block\n");
+        return IO_ERROR;
+    }
+    return OK;
+}
+
+result_t encrypt_image(FILE* in, FILE* out, const char *iv) {
+    uint8_t computed_md5hash[hash_size];
+    size_t content_size;
+    int index;
+    de_obfuscate_context_t context;
+    context.out = out;
+
+    memset(context.xor_block, 0, sizeof(context.xor_block));
+
+    if (iv != NULL && strlen(iv) == hash_size * 2) {
+        for(index = 0;index < hash_size; index++) {
+            context.key_block[index] = hexbyte(iv + (index * 2));
+        }
+    } else {
+        for(index = 0; index < hash_size; index++) {
+            context.key_block[index] = random() & 0xFF;
+        }
+    }
+
+    fprint_hex(stderr, "Key                :", context.key_block);
+    fseek(in, 0L, SEEK_END);
+    content_size = ftell(in);
+    if (content_size % 16 != 0) {
+        fprintf(stderr, "Input size needs to be a multiple of 16\n");
+        return ERROR;
+    }
+    fseek(in, 0L, SEEK_SET);
+
+    if (block_processor(in, hash_size, content_size, &obfuscate_block_processor, &context) != OK) {
+        fprintf(stderr, "Error processing file.\n");
+        return ERROR;
+    }
+
+    if (fwrite(context.key_block, key_size, 1, out) != 1) {
+        fprintf(stderr, "Unable to write key to output.\n");
+        return IO_ERROR;
+    }
+
+    fseek(out, 0L, SEEK_SET);
+    if (md5_hash_file(out, content_size + key_size, computed_md5hash) != OK) {
+        fprintf(stderr, "Error processing md5 hashing.\n");
+        return ERROR;
+    }
+    obfuscate_block(context.key_block, computed_md5hash, computed_md5hash);
+
+    fprint_hex(stderr, "Calculated MD5 hash:", computed_md5hash);
+    if (fwrite(computed_md5hash, hash_size, 1, out) != 1) {
+        fprintf(stderr, "Unable to write computed md5 to output.\n");
+        return IO_ERROR;
+    }
+
+    return OK;
 }
 
 result_t chksum_block_processor(uint8_t* data, size_t bytes_read, void *context) {
@@ -263,6 +340,7 @@ void help() {
     fprintf(stderr, "           encrypt - encrypt a boot.img or vendor.img file\n");
     fprintf(stderr, "           decrypt - decrypt a boot.img or vendor.img file\n");
     fprintf(stderr, "\n");
+    fprintf(stderr, "    -k     optional: provide key (32 char hex) for encrypt\n");
     fprintf(stderr, "    -s     source file or - for stdin\n");
     fprintf(stderr, "    -d     destination file or - for stdout\n");
 }
@@ -273,17 +351,21 @@ int main(int argc, char*argv[]) {
     int result = 0;
     char *src_file = NULL;
     char *dst_file = NULL;
+    char *iv = NULL;
     char *cmd = NULL;
     FILE *in, *out;
     enum command_t command;
 
-    while((opt = getopt(argc, argv, "hc:s:d:")) >= 0) {
+    while((opt = getopt(argc, argv, "hc:k:s:d:")) >= 0) {
         switch(opt) {
             case 'h':
                 help();
                 return result;
             case 'c':
                 cmd = optarg;
+                break;
+            case 'k':
+                iv = optarg;
                 break;
             case 's':
                 src_file = optarg;
@@ -353,7 +435,7 @@ int main(int argc, char*argv[]) {
             if (strcmp(dst_file,"-") == 0) {
                 out = stdout;
             } else {
-                out = fopen(dst_file, "wb");
+                out = fopen(dst_file, "w+b");
             }
 
             if (out == NULL) {
@@ -368,7 +450,7 @@ int main(int argc, char*argv[]) {
                     result = decrypt_image(in, out);
                     break;
                 case encrypt:
-                    result = encrypt_image(in, out);
+                    result = encrypt_image(in, out, iv);
                     break;
             }
             fclose(in);
